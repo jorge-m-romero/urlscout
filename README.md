@@ -9,7 +9,7 @@ Quick triage for a list of URLs against [VirusTotal](https://www.virustotal.com)
 
 It's useful when you've pulled links out of a phishing email, proxy logs or an alert and want a quick idea of whether they're known to be bad. It is a sibling of [ipscout](../ipscout).
 
-Python 3.10+, standard library only. Nothing to `pip install`.
+Python 3.11+, standard library only. Nothing to `pip install`.
 
 ## Usage
 
@@ -97,7 +97,7 @@ The exit code is `1` if any lookup failed, so the script can be used in pipeline
 python -m unittest discover -s tests -v
 ```
 
-The tests mock all network calls, so they run offline. GitHub Actions runs them on Python 3.10, 3.12 and 3.14.
+The tests mock all network calls, so they run offline. GitHub Actions runs them on Python 3.11, 3.12 and 3.14.
 
 ## Roadmap ideas
 
