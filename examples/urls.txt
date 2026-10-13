@@ -1,0 +1,9 @@
+# Sample input: one URL per line, '#' starts a comment (needs a space before it)
+https://www.google.com/
+hxxps://example[.]com/login        # defanged URLs are refanged automatically
+www.wikipedia.org                  # no scheme: http:// is assumed
+http://example.com/page#section    # '#' with no space before it is a URL fragment
+http://192.168.1.10/admin          # private, never sent to VirusTotal
+http://intranet/wiki               # single-label host, treated as internal
+https://www.google.com/            # duplicate, ignored
+ftp://files.example.com/           # not http(s), reported as a warning
