@@ -7,7 +7,7 @@ Quick triage for a list of URLs against [VirusTotal](https://www.virustotal.com)
 - **Page title and final URL**: where the URL ended up after redirects, as of the last scan
 - **Reputation** and the date of the last analysis
 
-It's useful when you've pulled links out of a phishing email, proxy logs or an alert and want a quick idea of whether they're known to be bad. It is a sibling of [ipscout](../ipscout).
+It's useful when you've pulled links out of a phishing email, proxy logs or an alert and want a quick idea of whether they're known to be bad. With `--domains` it checks whole domains instead, and also shows when each domain was registered. It is a sibling of [ipscout](../ipscout).
 
 Python 3.11+, standard library only. Nothing to `pip install`.
 
@@ -32,6 +32,19 @@ Single URLs, defanged output and saved results:
 ./urlscout.py -u 'hxxps://login-micros0ft[.]com/auth' --defang --csv results.csv --json results.json
 ```
 
+Checking domains rather than exact URLs, for example sender domains from mail logs:
+
+```bash
+./urlscout.py --domains domains.txt
+```
+
+```
+Domain              VirusTotal                Categories  Created
+------------------  ------------------------  ----------  ----------
+example.com         clean (0 mal, 0 sus)      business    1995-08-14
+evil-login.example  MALICIOUS (7 mal, 1 sus)  phishing    2026-10-09
+```
+
 Reading from a pipe, for example URLs pulled from an email:
 
 ```bash
@@ -51,13 +64,20 @@ One URL per line, from a file, stdin (`-`), or `-u URL` (repeatable, and combina
 
 **Look-alike domains:** the `domain` field always holds the real (punycode) form of the host, and a note is printed when it differs from what's displayed. For example, `gооgle.com` written with Cyrillic `о`s shows up as `xn--ggle-55da.com`.
 
+### URLs or domains?
+
+By default urlscout looks up the **exact URL**. VirusTotal only has a report for a URL if someone has submitted that exact address, so a list of bare domains (`example.com`) mostly comes back `not found`.
+
+`--domains` uses VirusTotal's **domain report** instead. It covers the whole domain, almost always exists, and adds the registration date and registrar. A domain registered a few days ago is a common sign of phishing infrastructure. In this mode, URLs in the input are reduced to their domain (`https://evil.com/login` becomes `evil.com`), duplicates are merged, and IP addresses are rejected: use [ipscout](../ipscout) for those. Domains can't be submitted for scanning, so `--submit` can't be combined with `--domains`.
+
 ### Options
 
 | Option | Description |
 |---|---|
-| `-u URL` | Check this URL. Can be repeated. |
+| `-u URL` | Check this URL (or domain, with `--domains`). Can be repeated. |
+| `--domains` | Look up domain reports instead of exact URLs. See above. |
 | `--submit` | Submit URLs VirusTotal has never seen for a fresh scan and wait for the result. See the privacy note below. |
-| `--defang` | Defang URLs in the table, CSV and JSON (`hxxps://evil[.]com`), so they're safe to paste into tickets or chat |
+| `--defang` | Defang URLs and domains in the table, CSV and JSON (`hxxps://evil[.]com`), so they're safe to paste into tickets or chat |
 | `--vt-delay N` | Seconds between VirusTotal calls. Default 15, to stay within the free tier's 4 requests/minute. Use `0` with a premium key. |
 | `--csv PATH` / `--json PATH` | Also save results to a file |
 | `-q` | Hide progress messages |
@@ -72,7 +92,9 @@ The key is read from the environment only, so it doesn't end up in your shell hi
 
 ## Output fields (CSV/JSON)
 
-`url, scope, domain, vt_verdict, vt_malicious, vt_suspicious, vt_harmless, vt_undetected, vt_reputation, vt_categories, vt_final_url, vt_title, vt_last_analysis, vt_link, error`
+`url, scope, domain, vt_verdict, vt_malicious, vt_suspicious, vt_harmless, vt_undetected, vt_reputation, vt_categories, vt_final_url, vt_title, vt_last_analysis, vt_created, vt_registrar, vt_link, error`
+
+`url`, `vt_final_url` and `vt_title` are empty in `--domains` mode. `vt_created` and `vt_registrar` are filled only in `--domains` mode.
 
 `vt_verdict` is one of:
 - `MALICIOUS`: at least one engine flags the URL as malicious
@@ -101,7 +123,7 @@ The tests mock all network calls, so they run offline. GitHub Actions runs them 
 
 ## Roadmap ideas
 
-- [ ] Fall back to a domain report when the exact URL isn't known
+- [ ] In URL mode, fall back to the domain report when the exact URL isn't known
 - [ ] urlscan.io and Google Safe Browsing as extra sources
 - [ ] Cache results locally so repeat lookups don't use up API quota
 - [ ] Extract URLs directly from `.eml` files

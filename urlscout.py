@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""urlscout - check a list of URLs against VirusTotal.
+"""urlscout - check a list of URLs (or domains) against VirusTotal.
 
 Accepts defanged input (hxxp://evil[.]com), skips internal URLs, and can
-optionally submit URLs VirusTotal has never seen.
+optionally submit URLs VirusTotal has never seen. With --domains it looks up
+VirusTotal's domain reports instead of exact URLs.
 
 Standard library only: no pip install needed.
 """
@@ -30,15 +31,20 @@ __version__ = "0.1.0"
 USER_AGENT = f"urlscout/{__version__}"
 VT_API = "https://www.virustotal.com/api/v3"
 VT_GUI_URL = "https://www.virustotal.com/gui/url/{id}"
+VT_GUI_DOMAIN = "https://www.virustotal.com/gui/domain/{domain}"
 MAX_RESPONSE_BYTES = 1_000_000
 CSV_FORMULA_CHARS = ("=", "+", "-", "@", "\t", "\r")
 INTERNAL_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa", ".corp")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# Dotted hostname (after punycode conversion) with an alphabetic TLD, so IPs don't match
+DOMAIN_RE = re.compile(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+"
+                       r"(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})")
 
 FIELDS = [
     "url", "scope", "domain", "vt_verdict", "vt_malicious", "vt_suspicious",
     "vt_harmless", "vt_undetected", "vt_reputation", "vt_categories",
-    "vt_final_url", "vt_title", "vt_last_analysis", "vt_link", "error",
+    "vt_final_url", "vt_title", "vt_last_analysis", "vt_created", "vt_registrar",
+    "vt_link", "error",
 ]
 
 
@@ -133,27 +139,50 @@ def ascii_host(url):
         return host
 
 
+def normalise_domain(text):
+    """Refang and validate one domain, returned lowercase in punycode form.
+    A URL is accepted too and reduced to its host. Returns None for IPs and
+    anything that isn't a dotted hostname."""
+    url = normalise_url(text)
+    if url is None:
+        return None
+    host = ascii_host(url).rstrip(".")
+    return host if DOMAIN_RE.fullmatch(host) else None
+
+
+def defang_domain(domain):
+    return domain.replace(".", "[.]")
+
+
 def load_urls(lines):
-    """Parse URLs from an iterable of lines.
+    return load_entries(lines, normalise_url)
+
+
+def load_domains(lines):
+    return load_entries(lines, normalise_domain)
+
+
+def load_entries(lines, parse):
+    """Parse URLs or domains (via `parse`) from an iterable of lines.
 
     Blank lines and lines starting with '#' are ignored, as is a ' #' comment
     after the URL (a '#' with no space before it is kept, since URLs use it
     for fragments). Duplicates are dropped (first one wins, order kept).
-    Returns (urls, invalid) where invalid is a list of (line_number, text) tuples.
+    Returns (values, invalid) where invalid is a list of (line_number, text) tuples.
     """
-    seen, urls, invalid = set(), [], []
+    seen, values, invalid = set(), [], []
     for lineno, line in enumerate(lines, 1):
         entry = re.split(r"\s#", line, maxsplit=1)[0].strip()
         if not entry or entry.startswith("#"):
             continue
-        url = normalise_url(entry)
-        if url is None:
+        value = parse(entry)
+        if value is None:
             invalid.append((lineno, clean(entry)))
             continue
-        if url not in seen:
-            seen.add(url)
-            urls.append(url)
-    return urls, invalid
+        if value not in seen:
+            seen.add(value)
+            values.append(value)
+    return values, invalid
 
 
 # ----------------------------------------------------------------------- lookups
@@ -196,7 +225,7 @@ def int_stats(stats):
     return {k: v for k, v in (stats or {}).items() if isinstance(v, int)}
 
 
-def stats_fields(stats, sha):
+def stats_fields(stats, sha=None):
     """The verdict/count fields shared by URL reports and fresh analyses."""
     row = {
         "vt_verdict": vt_verdict(stats) or "not analysed",
@@ -208,6 +237,22 @@ def stats_fields(stats, sha):
     if isinstance(sha, str) and SHA256_RE.match(sha):
         row["vt_link"] = VT_GUI_URL.format(id=sha)
     return row
+
+
+def fmt_time(value, fmt="%Y-%m-%d %H:%M"):
+    return datetime.fromtimestamp(value, timezone.utc).strftime(fmt) if isinstance(value, int) else ""
+
+
+def report_fields(attrs):
+    """Fields shared by VirusTotal's URL and domain reports."""
+    reputation = attrs.get("reputation")
+    categories = attrs.get("categories")
+    return {
+        "vt_reputation": reputation if isinstance(reputation, int) else 0,
+        "vt_categories": ", ".join(sorted({clean(c).lower() for c in categories.values()}))
+                         if isinstance(categories, dict) else "",
+        "vt_last_analysis": fmt_time(attrs.get("last_analysis_date")),
+    }
 
 
 def check_auth(status):
@@ -226,17 +271,31 @@ def vt_lookup(url, api_key):
     obj = data.get("data") or {}
     attrs = obj.get("attributes") or {}
     row = stats_fields(int_stats(attrs.get("last_analysis_stats")), obj.get("id"))
-    reputation = attrs.get("reputation")
-    categories = attrs.get("categories")
-    when = attrs.get("last_analysis_date")
+    row.update(report_fields(attrs))
     row.update({
-        "vt_reputation": reputation if isinstance(reputation, int) else 0,
-        "vt_categories": ", ".join(sorted({clean(c).lower() for c in categories.values()}))
-                         if isinstance(categories, dict) else "",
         "vt_final_url": clean(attrs.get("last_final_url")),
         "vt_title": clean(attrs.get("title")),
-        "vt_last_analysis": datetime.fromtimestamp(when, timezone.utc).strftime("%Y-%m-%d %H:%M")
-                            if isinstance(when, int) else "",
+    })
+    return row
+
+
+def vt_domain_lookup(domain, api_key):
+    """Fetch VirusTotal's report for a domain. `domain` must already have
+    passed normalise_domain, so it's safe to put in the path and GUI link."""
+    status, data = http_json(f"{VT_API}/domains/{urllib.parse.quote(domain, safe='')}",
+                             headers={"x-apikey": api_key})
+    check_auth(status)
+    if status == 404:
+        return {"vt_verdict": "not found"}
+    if status != 200 or not data:
+        return {"error": f"VirusTotal: unexpected response (HTTP {status})"}
+    attrs = (data.get("data") or {}).get("attributes") or {}
+    row = stats_fields(int_stats(attrs.get("last_analysis_stats")))
+    row.update(report_fields(attrs))
+    row.update({
+        "vt_created": fmt_time(attrs.get("creation_date"), "%Y-%m-%d"),
+        "vt_registrar": clean(attrs.get("registrar")),
+        "vt_link": VT_GUI_DOMAIN.format(domain=domain),
     })
     return row
 
@@ -334,10 +393,24 @@ def scan(url, api_key, throttle, submit=False, log=print):
     return row
 
 
+def scan_domain(domain, api_key, throttle, log=print):
+    """Build the result row for one domain."""
+    row = {"url": "", "domain": domain}
+    if is_internal("http://" + domain):
+        row["scope"] = "internal"
+        return row
+    row["scope"] = "public"
+    throttle.wait()
+    row.update(with_retry(vt_domain_lookup, domain, api_key, log=log))
+    return row
+
+
 # ------------------------------------------------------------------------ output
 
 def defang_row(row):
-    out = dict(row, url=defang(row["url"]))
+    out = dict(row, domain=defang_domain(row.get("domain", "")))
+    if out.get("url"):
+        out["url"] = defang(out["url"])
     if out.get("vt_final_url"):
         out["vt_final_url"] = defang(out["vt_final_url"])
     return out
@@ -352,9 +425,14 @@ def vt_summary(row):
     return row.get("vt_verdict") or ("error" if row.get("error") else "-")
 
 
-def print_table(rows, out=sys.stdout):
-    cols = [("URL", "url", 60), ("VirusTotal", "vt", 28), ("Categories", "vt_categories", 30),
-            ("Title", "vt_title", 30)]
+def print_table(rows, domains=False, out=None):
+    out = out or sys.stdout
+    if domains:
+        cols = [("Domain", "domain", 45), ("VirusTotal", "vt", 28),
+                ("Categories", "vt_categories", 30), ("Created", "vt_created", 10)]
+    else:
+        cols = [("URL", "url", 60), ("VirusTotal", "vt", 28),
+                ("Categories", "vt_categories", 30), ("Title", "vt_title", 30)]
     display = [dict(r, vt=vt_summary(r)) for r in rows]
     widths = [min(w, max([len(h)] + [len(str(d.get(k, ""))) for d in display]))
               for h, k, w in cols]
@@ -389,20 +467,23 @@ def write_json(rows, path):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Check a list of URLs against VirusTotal. Defanged URLs "
-                    "(hxxp://evil[.]com) are accepted.",
+        description="Check a list of URLs (or, with --domains, domains) against VirusTotal. "
+                    "Defanged input (hxxp://evil[.]com) is accepted.",
         epilog="The API key is read from the VT_API_KEY environment variable, so it "
                "doesn't end up in your shell history.",
     )
     p.add_argument("file", nargs="?",
-                   help="text file with one URL per line ('-' for stdin)")
+                   help="text file with one URL (or domain) per line ('-' for stdin)")
     p.add_argument("-u", "--url", action="append", default=[], metavar="URL",
-                   help="URL to check; can be repeated, and combined with a file")
+                   help="URL (or domain) to check; can be repeated, and combined with a file")
+    p.add_argument("--domains", action="store_true",
+                   help="look up VirusTotal's domain reports instead of exact URLs. "
+                        "URLs in the input are reduced to their domain.")
     p.add_argument("--submit", action="store_true",
                    help="submit URLs VirusTotal has never seen for a fresh scan. "
                         "Submitted URLs become visible to other VirusTotal users.")
     p.add_argument("--defang", action="store_true",
-                   help="defang URLs in the output (hxxp://evil[.]com)")
+                   help="defang URLs and domains in the output (hxxp://evil[.]com)")
     p.add_argument("--csv", metavar="PATH", help="also write results to CSV")
     p.add_argument("--json", metavar="PATH", help="also write results to JSON")
     p.add_argument("--vt-delay", type=float, default=15.0, metavar="SECONDS",
@@ -413,6 +494,8 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     if not args.file and not args.url:
         p.error("give a file of URLs, '-' for stdin, or at least one --url")
+    if args.domains and args.submit:
+        p.error("--submit only works for URLs: VirusTotal can't scan a bare domain")
     return args
 
 
@@ -436,26 +519,34 @@ def main(argv=None):
                 lines += f.readlines()
     except OSError as e:
         sys.exit(f"Cannot read {args.file}: {e.strerror}")
-    urls, invalid = load_urls(lines)
+    if args.domains:
+        kind, targets, invalid = "domain", *load_domains(lines)
+        as_url, show = (lambda d: "http://" + d), defang_domain
+    else:
+        kind, targets, invalid = "URL", *load_urls(lines)
+        as_url, show = (lambda u: u), defang
 
     for lineno, text in invalid:
-        log(f"warning: entry {lineno}: not an http(s) URL: {text!r}")
-    if not urls:
-        sys.exit("No valid URLs found.")
+        log(f"warning: entry {lineno}: not {'a domain' if args.domains else 'an http(s) URL'}: {text!r}")
+    if not targets:
+        sys.exit(f"No valid {kind}s found.")
 
-    public = sum(not is_internal(u) for u in urls)
-    log(f"Checking {len(urls)} URL(s) ({public} on VirusTotal"
+    public = sum(not is_internal(as_url(t)) for t in targets)
+    log(f"Checking {len(targets)} {kind}(s) ({public} on VirusTotal"
         + (f", ~{int(public * args.vt_delay)}s at {args.vt_delay:g}s apart" if args.vt_delay else "")
         + ")...")
     throttle = Throttle(args.vt_delay)
     rows = []
-    for i, url in enumerate(urls, 1):
-        log(f"  [{i}/{len(urls)}] {defang(url)}")
-        rows.append(scan(url, vt_key, throttle, submit=args.submit, log=log))
+    for i, target in enumerate(targets, 1):
+        log(f"  [{i}/{len(targets)}] {show(target)}")
+        if args.domains:
+            rows.append(scan_domain(target, vt_key, throttle, log=log))
+        else:
+            rows.append(scan(target, vt_key, throttle, submit=args.submit, log=log))
 
     if args.defang:
         rows = [defang_row(r) for r in rows]
-    print_table(rows)
+    print_table(rows, domains=args.domains)
     if args.csv:
         write_csv(rows, args.csv)
         log(f"CSV written to {args.csv}")
@@ -465,7 +556,7 @@ def main(argv=None):
 
     errors = [r for r in rows if r.get("error")]
     for r in errors:
-        log(f"error: {r['url']}: {r['error']}")
+        log(f"error: {r['url'] or r['domain']}: {r['error']}")
     return 1 if errors else 0
 
 

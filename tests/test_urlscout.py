@@ -141,6 +141,64 @@ class LookupTests(unittest.TestCase):
         sleep.assert_called_once_with(15)
 
 
+class DomainModeTests(unittest.TestCase):
+    def test_normalise_domain(self):
+        cases = {"Example.COM": "example.com", "hxxps://evil[.]example/x?y": "evil.example",
+                 "http://user@ex.example:8080/": "ex.example", "example.com.": "example.com",
+                 "g\u043e\u043egle.com": "xn--ggle-55da.com", "tenant.onmicrosoft.com": "tenant.onmicrosoft.com"}
+        for text, want in cases.items():
+            self.assertEqual(urlscout.normalise_domain(text), want, text)
+        for text in ["8.8.8.8", "127.1", "localhost", "intranet", "a..b.com", "-x.com", "ftp://x.com/"]:
+            self.assertIsNone(urlscout.normalise_domain(text), text)
+
+    def test_load_domains_dedupes_after_normalising(self):
+        domains, invalid = urlscout.load_domains(["example.com\n", "EXAMPLE.com\n",
+                                                  "https://example.com/a\n", "10.0.0.1\n"])
+        self.assertEqual(domains, ["example.com"])
+        self.assertEqual(invalid, [(4, "10.0.0.1")])
+
+    def test_domain_report_mapped(self):
+        data = {"data": {"attributes": {
+            "reputation": 3, "categories": {"A": "Business"}, "registrar": "Evil\x1bReg",
+            "creation_date": 1700000000, "last_analysis_date": 1760000000,
+            "last_analysis_stats": {"malicious": 0, "suspicious": 0, "harmless": 60}}}}
+        with mock.patch.object(urlscout, "http_json", return_value=(200, data)) as http:
+            row = urlscout.vt_domain_lookup("example.com", "key")
+        self.assertTrue(http.call_args.args[0].endswith("/domains/example.com"))
+        self.assertEqual(row["vt_verdict"], "clean")
+        self.assertEqual(row["vt_categories"], "business")
+        self.assertEqual(row["vt_created"], "2023-11-14")
+        self.assertEqual(row["vt_registrar"], "EvilReg")
+        self.assertEqual(row["vt_link"], urlscout.VT_GUI_DOMAIN.format(domain="example.com"))
+
+    def test_domain_not_found(self):
+        with mock.patch.object(urlscout, "http_json", return_value=(404, None)):
+            self.assertEqual(urlscout.vt_domain_lookup("new.example", "key"),
+                             {"vt_verdict": "not found"})
+
+    def test_internal_domain_makes_no_external_call(self):
+        with mock.patch.object(urlscout, "http_json") as http:
+            row = urlscout.scan_domain("printer.local", "key", urlscout.Throttle(0), **QUIET)
+        http.assert_not_called()
+        self.assertEqual(row["scope"], "internal")
+
+    def test_submit_not_allowed_with_domains(self):
+        with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            urlscout.parse_args(["-u", "example.com", "--domains", "--submit"])
+
+    def test_main_domain_mode(self):
+        data = {"data": {"attributes": {"last_analysis_stats": {"malicious": 2}}}}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"VT_API_KEY": "k"}), \
+             mock.patch.object(urlscout, "http_json", return_value=(200, data)), \
+             mock.patch("sys.stdout", out), mock.patch("sys.stderr", io.StringIO()):
+            code = urlscout.main(["-u", "hxxp://evil[.]example/login", "--domains",
+                                  "--defang", "--vt-delay", "0"])
+        self.assertEqual(code, 0)
+        self.assertIn("evil[.]example", out.getvalue())
+        self.assertIn("MALICIOUS", out.getvalue())
+
+
 class SecurityTests(unittest.TestCase):
     def test_csv_formula_injection_neutralised(self):
         row = {"url": "https://example.com/", "scope": "public",
@@ -202,8 +260,10 @@ class OutputTests(unittest.TestCase):
         self.assertIn("(internal, skipped)", out.getvalue())
 
     def test_defang_row(self):
-        row = urlscout.defang_row({"url": "http://evil.example/", "vt_final_url": "https://x.example/"})
+        row = urlscout.defang_row({"url": "http://evil.example/", "domain": "evil.example",
+                                   "vt_final_url": "https://x.example/"})
         self.assertEqual(row["url"], "hxxp://evil[.]example/")
+        self.assertEqual(row["domain"], "evil[.]example")
         self.assertEqual(row["vt_final_url"], "hxxps://x[.]example/")
 
 
