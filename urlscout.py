@@ -218,6 +218,8 @@ def vt_verdict(stats):
         return "MALICIOUS"
     if stats.get("suspicious", 0) > 0:
         return "SUSPICIOUS"
+    if stats.get("harmless", 0) == 0:
+        return "unrated"  # every engine said "undetected": no opinion, not a clean bill
     return "clean"
 
 
@@ -243,14 +245,26 @@ def fmt_time(value, fmt="%Y-%m-%d %H:%M"):
     return datetime.fromtimestamp(value, timezone.utc).strftime(fmt) if isinstance(value, int) else ""
 
 
+def parse_categories(categories):
+    """Flatten vendor categories into one sorted, de-duplicated list. Some vendors
+    pack several into one value, e.g. 'entertainment, sports (alphamountain.ai)'."""
+    if not isinstance(categories, dict):
+        return ""
+    found = set()
+    for value in categories.values():
+        for part in clean(value).lower().split(","):
+            part = re.sub(r"\s*\([^)]*\)\s*$", "", part).strip()
+            if part:
+                found.add(part)
+    return ", ".join(sorted(found))
+
+
 def report_fields(attrs):
     """Fields shared by VirusTotal's URL and domain reports."""
     reputation = attrs.get("reputation")
-    categories = attrs.get("categories")
     return {
         "vt_reputation": reputation if isinstance(reputation, int) else 0,
-        "vt_categories": ", ".join(sorted({clean(c).lower() for c in categories.values()}))
-                         if isinstance(categories, dict) else "",
+        "vt_categories": parse_categories(attrs.get("categories")),
         "vt_last_analysis": fmt_time(attrs.get("last_analysis_date")),
     }
 

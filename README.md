@@ -99,7 +99,8 @@ The key is read from the environment only, so it doesn't end up in your shell hi
 `vt_verdict` is one of:
 - `MALICIOUS`: at least one engine flags the URL as malicious
 - `SUSPICIOUS`: no malicious flags, but at least one suspicious flag
-- `clean`
+- `clean`: no malicious or suspicious flags, and at least one engine rates it harmless
+- `unrated`: every engine returned "undetected", so none has an opinion. Treat this as unknown, not safe.
 - `not found`: VirusTotal has no record of the URL (rerun with `--submit` to scan it)
 - `queued`: submitted with `--submit`, but the scan hadn't finished after ~80 seconds. Run again later.
 - `not analysed`: VirusTotal knows the URL but has no analysis stats for it

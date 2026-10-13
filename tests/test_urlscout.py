@@ -60,6 +60,23 @@ class InputTests(unittest.TestCase):
         self.assertEqual(urlscout.vt_url_id("http://example.com"), "aHR0cDovL2V4YW1wbGUuY29t")
 
 
+class VerdictTests(unittest.TestCase):
+    def test_vt_verdict(self):
+        self.assertEqual(urlscout.vt_verdict({"malicious": 2, "suspicious": 1}), "MALICIOUS")
+        self.assertEqual(urlscout.vt_verdict({"malicious": 0, "suspicious": 1}), "SUSPICIOUS")
+        self.assertEqual(urlscout.vt_verdict({"harmless": 56, "undetected": 36}), "clean")
+        self.assertEqual(urlscout.vt_verdict({"harmless": 0, "undetected": 92}), "unrated")
+        self.assertEqual(urlscout.vt_verdict({}), "")
+
+    def test_parse_categories(self):
+        cats = {"alphaMountain.ai": "Entertainment, Sports (alphaMountain.ai)",
+                "Forcepoint": "entertainment", "Sophos": "Sports", "X": "", "Y": 5}
+        self.assertEqual(urlscout.parse_categories(cats), "5, entertainment, sports")
+        self.assertEqual(urlscout.parse_categories({"A": "government/legal (alphamountain.ai)"}),
+                         "government/legal")
+        self.assertEqual(urlscout.parse_categories(None), "")
+
+
 class LookupTests(unittest.TestCase):
     def test_internal_url_makes_no_external_call(self):
         with mock.patch.object(urlscout, "http_json") as http:
